@@ -1,6 +1,6 @@
 {
   "name": "dsh-session-delete",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Session deletion for DeepSeek Harness: move a Session's durable log into a local trash directory, drop its Workspace accounting and archive/pin entries, and expose it through the sidebar row menu plus session_delete tools.",
   "type": "module",
   "main": "lib/index.js",

@@ -7,6 +7,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-12
+
+### Fixed
+
+- The success toast now reports what actually happened: a real move names the trash directory to
+  look in, and a Session whose log was already gone says so instead of claiming a move — which is how
+  a deletion could look like it "did nothing" while the directory stayed empty.
+
 ## [0.1.0] - 2026-10-12
 
 ### Added
@@ -33,5 +41,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Mounting the plugin row twice keeps the first `sessionDelete` service instead of failing on a
   duplicate `ctx.provide`.
 
-[Unreleased]: https://github.com/hakulat2023/dsh-session-delete/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/hakulat2023/dsh-session-delete/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/hakulat2023/dsh-session-delete/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/hakulat2023/dsh-session-delete/releases/tag/v0.1.0

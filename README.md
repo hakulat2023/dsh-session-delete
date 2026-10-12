@@ -99,7 +99,8 @@ Session row → **“…”** → **Delete session** → confirm.
 - A **running** Session is stopped first: the first confirmation already carries that intent.
 - A Session that is still **resident** in the host (typically the one you have open) is described as
   such and needs a second confirmation; the first click has no side effect at all.
-- On success the row disappears everywhere and a toast reports the outcome.
+- On success the row disappears everywhere and a toast reports the outcome **and the trash directory**
+  (a Session whose log was already gone is reported as such, never as a move).
 
 ### Agent tools
 
