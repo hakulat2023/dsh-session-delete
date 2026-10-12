@@ -1,0 +1,7 @@
+# dsh-session-delete bundle patch: one host row over the Web or Desktop profile.
+# The row name resolves from the profile's own node_modules, where
+# `plugin_manager install_bundle` (or `dsh plugin --profile <profile> add <path>`)
+# installed this package.
+- insert:
+    - id: session-delete
+      name: dsh-session-delete

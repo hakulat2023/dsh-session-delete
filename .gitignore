@@ -1,0 +1,19 @@
+# Dependencies and build output (this package has none, but contributors add tooling)
+node_modules/
+pnpm-lock.yaml
+package-lock.json
+yarn.lock
+
+# Logs and OS noise
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db
+
+# Editors
+.idea/
+.vscode/
+*.swp
+
+# Local scratch (never belongs in the plugin package)
+tmp/

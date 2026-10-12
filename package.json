@@ -1,0 +1,60 @@
+{
+  "name": "dsh-session-delete",
+  "version": "0.1.0",
+  "description": "Session deletion for DeepSeek Harness: move a Session's durable log into a local trash directory, drop its Workspace accounting and archive/pin entries, and expose it through the sidebar row menu plus session_delete tools.",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./typert": {
+      "default": "./lib/typert.host.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "docs",
+    "cordis.patch.yml",
+    "README.md",
+    "README.zh.md",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "test": "node test/verify.mjs"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
+    }
+  },
+  "keywords": [
+    "deepseek",
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "session",
+    "delete",
+    "trash"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hakulat2023/dsh-session-delete.git"
+  },
+  "homepage": "https://github.com/hakulat2023/dsh-session-delete#readme",
+  "bugs": {
+    "url": "https://github.com/hakulat2023/dsh-session-delete/issues"
+  },
+  "author": "hakulat2023",
+  "license": "MIT"
+}
