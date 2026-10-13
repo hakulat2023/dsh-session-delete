@@ -205,13 +205,14 @@ node test/verify.mjs      # 或 npm test
 
 ## 已验证的行为
 
-| 项目 | 验证方式 |
+| 项目 | 证据 |
 |---|---|
-| 真实的 macOS 回收站 | 把一个目录 rename 进真实 `~/.Trash`,按路径读回,再 rename 出去;全程 `readdir('~/.Trash')` 被拒 —— 这正是恢复记录要覆盖的场景 |
-| 端到端删除 | macOS / 桌面版 / DSH `0.2.0-rc.2`,一次性会话:删除 → 条目进回收站并带 `trash.json` → 恢复 → 日志回到原位,两条记录都被撤回,回收站无残留 |
-| 宿主清理 | 目录进回收站的同时:无 `session_projcache` 记录、`workspace.json` 的 `sessionIds` 中该 id 消失、已广播 `api-session/removed` |
-| 客户端 | 槽位检查显示 `sidebar.workspaces.session.menu.item` 的占用者中含 `session-delete`(order 500, active) |
-| 自测 | 32 项(`node test/verify.mjs`),含 macOS / XDG / 回收站三种后端、"不可枚举的回收站只能靠恢复记录"以及过期记录剪除 |
+| 真实 macOS 回收站 | 把目录 rename 进真实 `~/.Trash`,按路径读回,再 rename 出去;全程 `readdir('~/.Trash')` 被拒(TCC)—— 这正是恢复记录要覆盖的场景 |
+| 打包应用内的删除 | macOS / 桌面版 / DSH `0.2.0-rc.2`,重启后宿主半边确为 0.2.0:一次性会话 13,241 字节的日志落到 `~/.Trash/<id>-<时间戳>/`,带 `trash.json`(`backend: "macos-trash"`、标题已记录)与恢复记录;原目录、投影缓存记录、`workspace.json` 账户里的 id 均已消失 |
+| 打包应用内的恢复 | `session_restore` 把日志放回原位并撤回两条记录,恢复后的目录只剩 `session.lock` 与日志 |
+| 打包应用内的永久删除 | `session_delete(purge: true)` 返回 `deleted permanently`,回收站无残留 |
+| 客户端 | 会话菜单占用者含 `session-delete`(order 500, active),且只有一个实例(0.1.1 的幂等挂载修复) |
+| 自测 | 32 项(`node test/verify.mjs`):各平台后端、只能靠恢复记录的不可枚举回收站、过期记录、目的地不可用时不半删日志、Typert 清单与 SRC 兜底、无损 JSON 工具结果、浏览器半边重复挂载 |
 | CI | Node 20/22/24 × Ubuntu/macOS/Windows |
 
 ## 社区插件

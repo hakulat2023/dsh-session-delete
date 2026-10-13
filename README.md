@@ -228,13 +228,14 @@ Layout:
 
 ## Verified behaviour
 
-| What | How it was checked |
+| What | Evidence |
 |---|---|
-| Real macOS trash | a directory placed into the real `~/.Trash` (rename), read back by path, then renamed out — `readdir('~/.Trash')` refused throughout, which is what the restore record covers |
-| End-to-end deletion | macOS / desktop / DSH `0.2.0-rc.2`, disposable Session: delete → entry in the trash with `trash.json` → restore → log back, both records withdrawn, nothing left in the trash |
-| Host cleanup | with the directory in the trash: no `session_projcache` record, the id gone from `workspace.json`'s `sessionIds`, `api-session/removed` announced |
-| Client | slot inspection shows `session-delete` (order 500, active) among the occupants of `sidebar.workspaces.session.menu.item` |
-| Self-test | 32 checks (`node test/verify.mjs`), including the macOS, XDG and Recycle Bin backends, an unlistable trash that only the restore record can cover, and stale-record pruning |
+| Real macOS trash | a directory renamed into the real `~/.Trash`, read back by path, then renamed out — `readdir('~/.Trash')` refused throughout (TCC), which is exactly what the restore record covers |
+| Delete, in the packaged app | macOS / desktop / DSH `0.2.0-rc.2`, after a restart so the host half really was 0.2.0: a disposable Session's 13,241-byte log landed in `~/.Trash/<id>-<timestamp>/` with its `trash.json` (`backend: "macos-trash"`, title recorded) and a restore record; the original directory, its projection-cache record, and its `workspace.json` account were gone |
+| Restore, in the packaged app | `session_restore` put the log back and withdrew both records — the directory then held only `session.lock` and the log |
+| Purge, in the packaged app | `session_delete(purge: true)` reported `deleted permanently` and left nothing in the trash |
+| Client | the Session menu's occupants include `session-delete` (order 500, active) — once, after the 0.1.1 reload-safety fix |
+| Self-test | 32 checks (`node test/verify.mjs`): the platform backends, an unlistable trash covered only by the restore record, stale records, an unusable destination that must not half-delete a log, the Typert manifest and SRC discovery, lossless-JSON tool results, browser-side re-application |
 | CI | Node 20/22/24 × Ubuntu/macOS/Windows |
 
 ## Community plugin
