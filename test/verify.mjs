@@ -9,12 +9,18 @@
  */
 
 import assert from "node:assert/strict";
+import * as fs from "node:fs/promises";
 import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { apply, createHostAdapter } from "../lib/index.js";
 import { TYPERT } from "../lib/typert.host.js";
-import { encodeSegment, projectKey, sessionDeleteError } from "../lib/session-trash.js";
+import { createSessionTrash, encodeSegment, projectKey, sessionDeleteError } from "../lib/session-trash.js";
+import { createDirectoryTrashBackend, createSystemTrashBackend, TRASH_RECORD } from "../lib/trash.js";
+import { createRestoreIndex } from "../lib/restore-index.js";
+
+/** The bundles the plugin hands its backends and its trash logic. */
+const trashPath = { basename, dirname, join };
 
 let failures = 0;
 const test = async (label, run) => {
@@ -107,7 +113,7 @@ async function fixture({ live = false, running = false, activity = [] } = {}) {
 		},
 		effect: () => () => {}
 	};
-	return { home, root, trashRoot, header, directory, persistence, ctx, state, config: { trashRoot } };
+	return { home, root, trashRoot, indexRoot: join(home, "restore-index"), header, directory, persistence, ctx, state, config: { trash: trashRoot, restoreIndexRoot: join(home, "restore-index") } };
 }
 
 /** Run `apply` against a fixture and hand back the service plus recorded state. */
@@ -329,13 +335,16 @@ await test("an unreadable title degrades to absent instead of failing", async ()
 	await rm(fx.home, { recursive: true, force: true });
 });
 
-await test("purge removes the trashed bytes immediately", async () => {
+await test("purge deletes outright and never touches the trash", async () => {
 	const fx = await fixture();
 	const service = mount(fx);
 	const result = await service.delete({ sessionId: fx.header.id, force: true, purge: true });
 	assert.equal(result.purged, true);
+	assert.equal(result.moved, false);
+	assert.equal(result.trashedTo, null);
 	assert.ok(result.notes.some((note) => note.includes("purge")));
-	await assert.rejects(() => stat(result.trashedTo), "the trash entry is gone");
+	await assert.rejects(() => stat(fx.directory), "the directory is gone");
+	await assert.rejects(() => stat(fx.trashRoot), "purge creates no trash directory at all");
 	await rm(fx.home, { recursive: true, force: true });
 });
 
@@ -409,6 +418,233 @@ await test("every tool result is lossless plain JSON", async () => {
 	await writeFile(join(fx.directory, "session.v4.jsonl.zstd"), "log-bytes", "utf8");
 	check("session_delete (trash)", await deleteTool.execute({ session_id: fx.header.id, purge: false }, {}));
 	check("session_restore", await restoreTool.execute({ session_id: fx.header.id }, {}));
+	await rm(fx.home, { recursive: true, force: true });
+});
+
+await test("the macOS backend hands the directory to ~/.Trash", async () => {
+	const home = await mkdtemp(join(tmpdir(), "dsh-sd-macos-"));
+	const backend = createSystemTrashBackend({ fs, path: trashPath, env: {}, home, platform: "darwin" });
+	assert.equal(backend.kind, "system");
+	assert.equal(backend.detail, "macos-trash");
+	const source = join(home, "sessions", "project", "session-a");
+	await mkdir(source, { recursive: true });
+	await writeFile(join(source, "session.v4.jsonl.zstd"), "log-bytes", "utf8");
+
+	const first = await backend.place(source, "session-a-2026-10-12T00-00-00-000Z", Date.now());
+	assert.equal(first.entry, join(home, ".Trash", "session-a-2026-10-12T00-00-00-000Z"));
+	assert.equal(first.move, "renamed");
+	assert.equal(await readFile(join(first.entry, "session.v4.jsonl.zstd"), "utf8"), "log-bytes");
+	await assert.rejects(() => stat(source), "Finder's Trash is where the directory went");
+
+	// Finder's own collision convention: the second entry gets a " 2" suffix.
+	const second = join(home, "sessions", "project", "session-b");
+	await mkdir(second, { recursive: true });
+	const placed = await backend.place(second, "session-a-2026-10-12T00-00-00-000Z", Date.now());
+	assert.equal(placed.entry, join(home, ".Trash", "session-a-2026-10-12T00-00-00-000Z 2"));
+
+	assert.deepEqual(await backend.list("session-a-"), [first.entry, placed.entry]);
+	const back = join(home, "sessions", "project", "restored");
+	await backend.takeBack(first.entry, back);
+	assert.equal(await readFile(join(back, "session.v4.jsonl.zstd"), "utf8"), "log-bytes");
+	await backend.discard(placed.entry);
+	assert.deepEqual(await backend.list("session-a-"), []);
+	await rm(home, { recursive: true, force: true });
+});
+
+await test("the Linux backend writes an XDG trash entry the desktop can restore", async () => {
+	const home = await mkdtemp(join(tmpdir(), "dsh-sd-xdg-"));
+	const dataHome = join(home, "data");
+	const backend = createSystemTrashBackend({ fs, path: trashPath, env: { XDG_DATA_HOME: dataHome }, home, platform: "linux" });
+	assert.equal(backend.detail, "xdg-trash");
+	const source = join(home, "sessions", "session-b");
+	await mkdir(source, { recursive: true });
+	await writeFile(join(source, "session.v4.jsonl.zstd"), "log-bytes", "utf8");
+	const at = Date.now();
+	const first = await backend.place(source, "session-b-2026-10-12T00-00-00-000Z", at);
+	assert.equal(first.entry, join(dataHome, "Trash", "files", "session-b-2026-10-12T00-00-00-000Z"));
+	const info = await readFile(join(dataHome, "Trash", "info", "session-b-2026-10-12T00-00-00-000Z.trashinfo"), "utf8");
+	assert.match(info, /^\[Trash Info\]\n/);
+	assert.ok(info.includes(`Path=${encodeURIComponent(source)}`), "Path is percent-encoded per the spec");
+	assert.match(info, /DeletionDate=\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
+
+	const second = join(home, "sessions", "session-c");
+	await mkdir(second, { recursive: true });
+	const placed = await backend.place(second, "session-b-2026-10-12T00-00-00-000Z", at);
+	assert.equal(basename(placed.entry), "session-b-2026-10-12T00-00-00-000Z.2");
+
+	const back = join(home, "sessions", "restored");
+	await backend.takeBack(first.entry, back);
+	await assert.rejects(() => stat(join(dataHome, "Trash", "info", "session-b-2026-10-12T00-00-00-000Z.trashinfo")), "restoring withdraws the trashinfo");
+	await backend.discard(placed.entry);
+	await assert.rejects(() => stat(join(dataHome, "Trash", "info", "session-b-2026-10-12T00-00-00-000Z.2.trashinfo")), "discarding withdraws the trashinfo");
+	await rm(home, { recursive: true, force: true });
+});
+
+await test("the Windows backend recycles through PowerShell and admits it cannot read back", async () => {
+	const calls = [];
+	const backend = createSystemTrashBackend({
+		fs,
+		path: trashPath,
+		env: {},
+		home: "C:\\Users\\fixture",
+		platform: "win32",
+		run: async (file, args) => {
+			calls.push({ file, args });
+		}
+	});
+	assert.equal(backend.detail, "recycle-bin");
+	const placed = await backend.place("C:\\Users\\fixture\\sessions\\session-a", "session-a-2026-10-12T00-00-00-000Z", Date.now());
+	assert.equal(placed.entry, null, "the bin's layout is not discoverable");
+	assert.equal(calls.length, 1);
+	assert.equal(calls[0].file, "powershell.exe");
+	const command = calls[0].args.at(-1);
+	assert.ok(command.includes("Microsoft.VisualBasic.FileIO.FileSystem"));
+	assert.ok(command.includes("SendToRecycleBin"));
+	assert.ok(command.includes("DeleteDirectory"));
+	assert.deepEqual(await backend.list("session-a-"), [], "nothing to enumerate");
+});
+
+await test("a platform without a system trash gets no backend", async () => {
+	assert.equal(createSystemTrashBackend({ fs, path: trashPath, env: {}, home: "/home/x", platform: "freebsd" }), undefined);
+	assert.equal(createSystemTrashBackend({ fs, path: trashPath, env: {}, home: "", platform: "darwin" }), undefined);
+});
+
+await test("deletion runs end to end over the real macOS backend", async () => {
+	const fx = await fixture();
+	const backend = createSystemTrashBackend({ fs, path: trashPath, env: {}, home: fx.home, platform: "darwin" });
+	const trash = createSessionTrash({ fs, path: trashPath, backend, host: createHostAdapter(fx.ctx, {}) });
+	const result = await trash.remove({ sessionId: fx.header.id, force: true });
+	assert.equal(result.moved, true);
+	assert.equal(result.backend, "system");
+	assert.equal(result.detail, "macos-trash");
+	assert.equal(result.trashRoot, null, "a system trash names no directory of ours");
+	assert.equal(result.trashedTo, join(fx.home, ".Trash", basename(result.trashedTo)));
+	const record = JSON.parse(await readFile(join(result.trashedTo, TRASH_RECORD), "utf8"));
+	assert.equal(record.backend, "macos-trash");
+	assert.equal(record.originalDirectory, fx.directory);
+	const restored = await trash.restore({ sessionId: fx.header.id });
+	assert.equal(restored.restoredTo, fx.directory);
+	await assert.rejects(() => stat(join(fx.directory, TRASH_RECORD)), "the provenance record is withdrawn on restore");
+	assert.deepEqual(fx.state.detached, [fx.header.id]);
+	await rm(fx.home, { recursive: true, force: true });
+});
+
+await test("an unusable destination fails without half-deleting the log", async () => {
+	const fx = await fixture();
+	const backend = {
+		kind: "system",
+		detail: "fixture",
+		describe: () => "the fixture trash",
+		place: async () => {
+			throw new Error("destination is read-only");
+		},
+		list: async () => [],
+		takeBack: async () => "renamed",
+		discard: async () => {}
+	};
+	const trash = createSessionTrash({ fs, path: trashPath, backend, host: createHostAdapter(fx.ctx, {}) });
+	const error = await rejection(() => trash.remove({ sessionId: fx.header.id, force: true }));
+	assert.equal(error.code, "session/delete-failed");
+	assert.ok(error.message.includes("destination is read-only"));
+	assert.ok(await stat(join(fx.directory, "session.v4.jsonl.zstd")), "the log is still there");
+	await assert.rejects(() => stat(join(fx.directory, TRASH_RECORD)), "the provenance record was withdrawn");
+	assert.deepEqual(fx.state.announced, [], "a failed deletion announces nothing");
+	await rm(fx.home, { recursive: true, force: true });
+});
+
+await test("a directory trash can be selected explicitly", async () => {
+	const fx = await fixture();
+	const root = join(fx.home, "own-trash");
+	const backend = createDirectoryTrashBackend({ fs, path: trashPath, root });
+	const trash = createSessionTrash({ fs, path: trashPath, backend, host: createHostAdapter(fx.ctx, {}) });
+	const result = await trash.remove({ sessionId: fx.header.id, force: true });
+	assert.equal(result.backend, "directory");
+	assert.equal(result.trashRoot, root);
+	assert.ok(result.trashedTo.startsWith(root));
+	await rm(fx.home, { recursive: true, force: true });
+});
+
+await test("a deletion records the entry it cannot list again", async () => {
+	const fx = await fixture();
+	// macOS in one line: the trash takes the directory, reads of a known child work,
+	// and readdir is refused, so this backend can never answer `list`.
+	const unlistable = {
+		kind: "system",
+		detail: "unlistable-trash",
+		describe: () => "an unlistable trash",
+		place: async (directory, name) => {
+			const entry = join(fx.home, "unlistable", name);
+			await mkdir(dirname(entry), { recursive: true });
+			await fs.rename(directory, entry);
+			return { entry, move: "renamed" };
+		},
+		list: async () => [],
+		takeBack: async (entry, target) => fs.rename(entry, target).then(() => "renamed"),
+		discard: async (entry) => fs.rm(entry, { recursive: true, force: true })
+	};
+	const index = createRestoreIndex({ fs, path: trashPath, root: join(fx.home, "index") });
+	const trash = createSessionTrash({ fs, path: trashPath, backend: unlistable, index, host: createHostAdapter(fx.ctx, {}) });
+	const result = await trash.remove({ sessionId: fx.header.id, force: true });
+	assert.equal(result.moved, true);
+	assert.deepEqual(result.notes, [], "writing the index is part of a normal deletion");
+
+	const records = await index.list(`${encodeSegment(fx.header.id)}-`);
+	assert.equal(records.length, 1);
+	assert.equal(records[0].record.entry, result.trashedTo);
+	assert.equal(records[0].record.originalDirectory, fx.directory);
+	assert.equal(records[0].record.backend, "unlistable-trash");
+
+	// The restore must work through the record alone: `list` contributes nothing.
+	const restored = await trash.restore({ sessionId: fx.header.id });
+	assert.equal(restored.restoredTo, fx.directory);
+	assert.ok(await stat(join(fx.directory, "session.v4.jsonl.zstd")), "the log is back");
+	assert.deepEqual(await index.list(`${encodeSegment(fx.header.id)}-`), [], "the record is withdrawn");
+	await assert.rejects(() => stat(join(fx.directory, TRASH_RECORD)), "the provenance record is withdrawn");
+	await rm(fx.home, { recursive: true, force: true });
+});
+
+await test("a stale record is pruned instead of blocking a restore", async () => {
+	const fx = await fixture();
+	const index = createRestoreIndex({ fs, path: trashPath, root: join(fx.home, "index") });
+	const backend = createDirectoryTrashBackend({ fs, path: trashPath, root: join(fx.home, "trash") });
+	const trash = createSessionTrash({ fs, path: trashPath, backend, index, host: createHostAdapter(fx.ctx, {}) });
+	// A record whose entry has been emptied out of the trash by the user.
+	await index.remember({ name: `${encodeSegment(fx.header.id)}-2026-01-01T00-00-00-000Z`, sessionId: fx.header.id, entry: join(fx.home, "trash", "gone"), originalDirectory: fx.directory });
+	const error = await rejection(() => trash.restore({ sessionId: fx.header.id }));
+	assert.equal(error.code, "session/restore-missing");
+	assert.ok(error.message.includes("no longer exist"), "the message says the entry is gone");
+	assert.deepEqual(await index.list(`${encodeSegment(fx.header.id)}-`), [], "the stale record is pruned");
+	await rm(fx.home, { recursive: true, force: true });
+});
+
+await test("purge leaves no restore record, and a pathless entry records nothing", async () => {
+	const fx = await fixture();
+	const index = createRestoreIndex({ fs, path: trashPath, root: join(fx.home, "index") });
+	const directory = createDirectoryTrashBackend({ fs, path: trashPath, root: join(fx.home, "trash") });
+	const trash = createSessionTrash({ fs, path: trashPath, backend: directory, index, host: createHostAdapter(fx.ctx, {}) });
+	await trash.remove({ sessionId: fx.header.id, force: true, purge: true });
+	assert.deepEqual(await index.list(`${encodeSegment(fx.header.id)}-`), [], "a purge records nothing");
+
+	// The Windows recycle bin reports no path it could restore from, so nothing is recorded.
+	await mkdir(fx.directory, { recursive: true });
+	await writeFile(join(fx.directory, "session.v4.jsonl.zstd"), "log-bytes", "utf8");
+	const recycle = {
+		kind: "system",
+		detail: "recycle-bin",
+		describe: () => "the Recycle Bin",
+		place: async () => ({ entry: null, move: "recycled" }),
+		list: async () => [],
+		takeBack: async () => "renamed",
+		discard: async () => {}
+	};
+	const windowsTrash = createSessionTrash({ fs, path: trashPath, backend: recycle, index, host: createHostAdapter(fx.ctx, {}) });
+	const result = await windowsTrash.remove({ sessionId: fx.header.id, force: true });
+	assert.equal(result.moved, true);
+	assert.equal(result.trashedTo, null);
+	assert.deepEqual(await index.list(`${encodeSegment(fx.header.id)}-`), [], "no path, no record");
+	const error = await rejection(() => windowsTrash.restore({ sessionId: fx.header.id }));
+	assert.equal(error.code, "session/restore-missing");
+	assert.ok(error.message.includes("by hand"), "the failure tells the user to open the Recycle Bin");
 	await rm(fx.home, { recursive: true, force: true });
 });
 

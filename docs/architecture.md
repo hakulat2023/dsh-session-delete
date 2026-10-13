@@ -44,23 +44,49 @@ cancels that turn the same way the user's own stop button does. Two properties m
 - **Bounded waiting.** The drain wait has a budget and honours the call's `AbortSignal`; if the work
   outlives it the call fails with `session/delete-active` and nothing has moved.
 
-### 2. The move
+### 2. The move into the platform's own trash
 
 ```js
 const located = ctx.sessionPersistence.locate?.(header);        // { kind: "jsonl", path }
 const directory = path.dirname(located.path);
-await fs.rename(directory, join(trashRoot, `${encodeSegment(id)}-${timestamp}`));
+const placement = await backend.place(directory, entryName, at); // rename, or copy across devices
 ```
 
-- `locate(header)` is the backend's own answer for where one Session lives, so a backend that
-  changes its on-disk layout does not need a plugin update. When a backend does not offer it, the
-  plugin reproduces the documented layout (the JSONL backend's lossy-but-readable `projectKey(cwd)`
-  project directory plus the injective `encodeSegment(id)` session directory).
-- `rename` is atomic on one filesystem and is the reason the trash lives beside the session root by
-  default; across devices the plugin degrades to `fs.cp` + `fs.rm`.
-- A `trash.json` next to the moved directory records the Session id, title, `cwd`, original
-  directory, byte and file counts, the move kind, and the deletion time — the same facts
-  `session_restore` and a human with `mv` need.
+- The **destination belongs to the platform**: `~/.Trash` on macOS, the XDG trash
+  (`$XDG_DATA_HOME/Trash/{files,info}`) on Linux, the Recycle Bin on Windows. A user already knows
+  where their trash is, and emptying it stays their decision — a plugin-owned trash next to the
+  session root means a second place nobody empties. `config.trash` can still name a directory when a
+  deployment has no usable system trash.
+- `locate(header)` is the persistence backend's own answer for where one Session lives, so a backend
+  that changes its on-disk layout does not need a plugin update. Without it the plugin reproduces the
+  documented layout (the JSONL backend's lossy-but-readable `projectKey(cwd)` project directory plus
+  the injective `encodeSegment(id)` session directory).
+- A `trash.json` record is written **inside** the directory before the move, so provenance travels
+  with the entry: a user who drags the folder out of the trash can still see which Session it was and
+  where it came from, and the Windows Recycle Bin — which this plugin cannot read back — keeps the
+  same information.
+- `purge: true` skips all of this and removes the directory outright.
+
+#### The restore index
+
+Deleting into the user's trash creates one problem a plugin-owned directory never had: **some
+platforms do not let a process enumerate it**. macOS is the concrete case, and it is worth stating
+precisely, because the plugin's restore path is shaped by it:
+
+| operation inside `~/.Trash` | result (macOS) |
+|---|---|
+| `rename` a directory in | works |
+| `stat` / read a known child path | works |
+| `rename` the entry back out | works |
+| `readdir('~/.Trash')` | **refused** — `EPERM`, "Operation not permitted" (TCC) |
+
+So the plugin also writes one small record per deletion under
+`$DSH_HOME/session-delete/entries/<entry name>.json` (`config.restoreIndexRoot` moves it): the entry
+path, the original directory, the backend, and the counts. It holds **no Session content** — the log
+stays in the trash — and it turns restore into a direct path operation instead of a search. A failed
+write never fails a deletion (it becomes a note); a missing or stale record never blocks anything
+either, because the backend's own listing is merged in as a second source, and a record whose entry
+has vanished is pruned rather than reported as an error.
 
 ### 3. Dropping the registrations
 
@@ -101,11 +127,20 @@ been told that the in-memory copy becomes unusable. It is never a default, and n
 
 ## Restore
 
-`session_restore` reads the newest trash entry for the Session id, moves the directory back to the
-`originalDirectory` recorded in `trash.json`, and refuses with `session/restore-conflict` if
-something already occupies that path. The restored Session becomes *visible* on the next workspace
-re-index — the registry caches headers for the life of the process, so the plugin documents a reload
-rather than pretending it can re-index another plugin's state.
+`session_restore` merges two candidate sources for the Session id — the restore index (newest first)
+and whatever the backend can list — then walks them newest-first: a candidate whose entry no longer
+exists is pruned (the user emptied the trash, or moved the folder), and the first live one is renamed
+back to the `originalDirectory` its record names. If that path is occupied it refuses with
+`session/restore-conflict`; if no candidate survives it reports `session/restore-missing` and says
+why. On success both records are withdrawn, so a restored Session directory holds only what the
+session store expects, and the Session becomes *visible* again on the next workspace re-index (the
+registry caches headers for the life of the process, so the plugin documents a reload rather than
+pretending it can re-index another plugin's state).
+
+A Windows Recycle Bin entry has no path the plugin can record or read back, so `session_delete`
+returns `trashedTo: null` there and `session_restore` explains that the folder has to be restored from
+the bin by hand. A platform with no reachable system trash logs a warning and falls back to a
+directory it owns.
 
 ## What is intentionally left alone
 
@@ -116,3 +151,5 @@ rather than pretending it can re-index another plugin's state.
   persistent index would need its own story; the plugin does not guess.
 - **`session.lock`.** It travels with the Session directory, so a restored Session keeps it; the
   JSONL backend treats a stale lock as recoverable.
+- **The plugin's own trash.** There is none by default any more: a second, invisible trash beside the
+  session root is exactly what users do not empty. `trash: directory` is an explicit opt-in.

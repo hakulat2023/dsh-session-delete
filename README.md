@@ -34,10 +34,14 @@ One deletion performs four steps:
    when it is, `workspace/session-stop` cancels the turn and the plugin waits (bounded) for the
    Session to go idle. A Session still resident in the host process is refused *before any side
    effect* and only deleted after a second, explicit confirmation.
-2. **Move the log.** The Session's own directory is moved — an atomic `rename` on one filesystem,
-   degrading to copy-and-remove across devices — into
-   `$DSH_HOME/session-trash/<sessionId>-<timestamp>/`, together with a `trash.json` record naming
-   the Session, its title, `cwd`, original directory, byte/file counts, and deletion time.
+2. **Trash the log.** The Session's own directory is handed to the **platform's own trash** — the
+   Finder's Trash on macOS, the XDG trash on Linux, the Recycle Bin on Windows — as
+   `<sessionId>-<timestamp>`, carrying a `trash.json` record with the title, `cwd`, original
+   directory, byte/file counts, and deletion time. `purge: true` deletes it outright instead.
+   A small record is also written under `$DSH_HOME/session-delete/entries/` (entry path plus original
+   directory, **no Session content**), because macOS refuses to let a process *enumerate* `~/.Trash`
+   (TCC): without it a trashed Session could not be found again. See
+   [docs/architecture.md](docs/architecture.md).
 3. **Drop the registrations.** The Session is detached from every Workspace account
    (`sessionIds`), removed from the registry-global archive and pin sets, and its projection-cache
    record is deleted.
@@ -116,40 +120,64 @@ Session row → **“…”** → **Delete session** → confirm.
 
 ### Restoring by hand
 
-A trashed Session is an ordinary directory:
+A trashed Session is an ordinary directory in the platform's trash:
+
+| Platform | Where it went | Notes |
+|---|---|---|
+| macOS | `~/.Trash/<sessionId>-<timestamp>/` | Finder shows it; “Put Back” is not offered (Finder did not move it), but `session_restore` works |
+| Linux | `$XDG_DATA_HOME/Trash/files/…` with its `.trashinfo` | the desktop's own “Restore” works as well |
+| Windows | the Recycle Bin | the plugin cannot read the bin back, so restore it by hand |
 
 ```bash
-cat ~/.dsh/session-trash/<sessionId>-*/trash.json      # originalDirectory, title, cwd, sizes
-mv ~/.dsh/session-trash/<sessionId>-*/  <originalDirectory>   # or use session_restore
+cat ~/.Trash/<sessionId>-*/trash.json      # originalDirectory, title, cwd, sizes
 ```
 
-The Workspace registry re-indexes stored headers on the next composition (a reload, or the next
-launch), which is when the restored Session reappears in the list.
+`session_restore(session_id)` puts it back and withdraws both records; the Session reappears in the
+list once the Workspace registry next indexes stored headers (a reload, or the next launch).
 
 ## Configuration
 
 | Field | Default | Meaning |
 |---|---|---|
-| `trashRoot` | `$DSH_HOME/session-trash` | Directory the Session directories are moved into; created on demand. Falls back to the persistence root's parent when `DSH_HOME` is unset. |
+| `trash` | `"system"` | Destination: `"system"` uses the platform's own trash, `"directory"` uses `trashRoot`, and any other string is taken as an absolute directory. |
+| `trashRoot` | `$DSH_HOME/session-trash` | The directory used by `trash: directory` (and by `trashRoot` alone, for 0.1 compatibility). |
+| `restoreIndexRoot` | `$DSH_HOME/session-delete` | Where the restore records live (`entries/<entry name>.json`). Metadata only — never Session content. |
 
 ```yaml
+# keep the platform trash (the default): nothing to configure
+- id: session-delete
+  name: dsh-session-delete
+
+# or own the destination, e.g. on a machine whose ~/.Trash is undesirable
 - id: session-delete
   name: dsh-session-delete
   config:
+    trash: directory
     trashRoot: /Volumes/big/dsh-session-trash
 ```
 
 ## Semantics and limits
 
-- **Deletion is a move, not a wipe.** Until you `purge`, the bytes are still on disk under
-  `trashRoot`. The trash is never cleaned automatically.
+- **Your trash, your decision.** Deleted Sessions land in the platform's trash and stay there until
+  *you* empty it; the plugin never empties it, and it leaves no trash directory of its own behind.
+- **macOS will not let a process list `~/.Trash`.** Moving in, reading a known entry, and moving it
+  back out all work; `readdir` is refused by TCC. That is the only reason a restore record exists —
+  `session_restore` follows the record instead of searching the trash. Emptying the trash makes the
+  record stale, and a stale record is pruned rather than reported as a failure.
+- **Windows restore is manual.** The Recycle Bin has no consumer-facing API for finding an entry
+  again, so `session_delete` reports `trashedTo: null` and `session_restore` explains that the folder
+  has to be restored from the Recycle Bin. A platform without a reachable system trash logs a warning
+  and falls back to `trash: directory`.
 - **A resident Session cannot be disposed by a third party.** The Session store owns its write
-  handles and exposes no delete verb, so deleting a Session that a live Agent still holds would
-  break that Agent's appends. The plugin refuses instead, and only proceeds on an explicit `force`
-  (the log is gone; the in-memory copy becomes unusable).
+  handles and exposes no delete verb, so deleting a Session that a live Agent still holds would break
+  that Agent's appends. The plugin refuses instead, and only proceeds on an explicit `force` (the log
+  is gone; the in-memory copy becomes unusable).
 - **Stopping is bounded.** The wait for running work to settle has a budget (15 s) and honours the
   call's `AbortSignal`; if the work outlives it, the call fails with `session/delete-active` and
   nothing is moved.
+- **An unusable destination fails loudly.** If the trash refuses the directory, the deletion fails
+  with `session/delete-failed` and the log is left exactly as it was — the provenance record written
+  for the attempt is withdrawn.
 - **Only the Session directory is touched.** Attachments and spills are content-addressed global
   storage and are not collected, so they may leave orphaned blobs.
 - **The search index needs no cleaning.** The session query index in the shipped composition is
@@ -175,6 +203,10 @@ fake Cordis context, and checks the pieces that are easy to get wrong —
 - the Gateway's fallback (“SRC”) discovery contract: Remote markers on the prototype plus
   signature-derived parameter names;
 - trash, restore, purge, missing-directory, forced, refused, and aborted paths;
+- the platform backends: `~/.Trash` naming, the XDG `files`/`info` pair and its `.trashinfo`, and the
+  PowerShell recycle command;
+- restore on a trash that refuses to be listed (macOS), stale records, and an unusable destination
+  that must not half-delete a log;
 - that every tool result is lossless plain JSON (the host rejects anything else);
 - re-application in one page: the real browser bundle, applied twice against a locale registry that
   throws on duplicates (once with a teardown, once without) must not fail or duplicate anything;
@@ -184,7 +216,9 @@ Layout:
 
 | Path | Role |
 |---|---|
-| `lib/session-trash.js` | Trash semantics over an injected host adapter (unit-testable) |
+| `lib/session-trash.js` | Admission, cleanup and restore over an injected host adapter (unit-testable) |
+| `lib/trash.js` | Platform trash backends: macOS `~/.Trash`, the XDG trash, the Recycle Bin, or a directory |
+| `lib/restore-index.js` | The metadata record that makes restore work on a trash that cannot be listed |
 | `lib/index.js` | Host plugin: the `sessionDelete` service, its Typert binding, and the two agent tools |
 | `lib/typert.host.js` | Hand-written Typert manifest (strict codecs; registered by `typert-loader`) |
 | `lib/client.js` | Browser half: menu row, confirmation dialog, `remote.sessionDelete` calls |
@@ -194,15 +228,14 @@ Layout:
 
 ## Verified behaviour
 
-On macOS, desktop app, DSH `0.2.0-rc.2`, profile `desktop`, against a disposable Session created for
-the test:
-
-| Step | Observed |
+| What | How it was checked |
 |---|---|
-| `session_delete` | Directory moved to `~/.dsh/session-trash/<id>-<stamp>/` with `trash.json` (`bytes: 13184`, `files: 2`, `move: "renamed"`); original directory gone; no `session_projcache` record; the id absent from `workspace.json`'s `sessionIds` |
-| `session_restore` | Log back at its original directory |
-| `session_delete(purge: true)` | Trash entry and log both gone; zero residue |
-| Client | Slot inspection shows `session-delete` (order 500, active) among the occupants of `sidebar.workspaces.session.menu.item` |
+| Real macOS trash | a directory placed into the real `~/.Trash` (rename), read back by path, then renamed out — `readdir('~/.Trash')` refused throughout, which is what the restore record covers |
+| End-to-end deletion | macOS / desktop / DSH `0.2.0-rc.2`, disposable Session: delete → entry in the trash with `trash.json` → restore → log back, both records withdrawn, nothing left in the trash |
+| Host cleanup | with the directory in the trash: no `session_projcache` record, the id gone from `workspace.json`'s `sessionIds`, `api-session/removed` announced |
+| Client | slot inspection shows `session-delete` (order 500, active) among the occupants of `sidebar.workspaces.session.menu.item` |
+| Self-test | 32 checks (`node test/verify.mjs`), including the macOS, XDG and Recycle Bin backends, an unlistable trash that only the restore record can cover, and stale-record pruning |
+| CI | Node 20/22/24 × Ubuntu/macOS/Windows |
 
 ## Community plugin
 

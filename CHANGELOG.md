@@ -7,6 +7,43 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-12
+
+### Changed
+
+- **Deletion now uses the platform's own trash** instead of a directory this plugin invented:
+  `~/.Trash` on macOS, the XDG trash (`$XDG_DATA_HOME/Trash`, `.trashinfo` included) on Linux, and
+  the Recycle Bin on Windows. The Session is therefore where the user already knows to look, and
+  emptying it stays the user's decision — the plugin never cleans its own trash or leaves one behind.
+- `config.trash` selects the destination: absent or `"system"` (the default) uses the platform trash,
+  `"directory"` uses `config.trashRoot` (or `$DSH_HOME/session-trash`), and any other string is taken
+  as an explicit directory. `trashRoot` alone still means `"directory"`.
+- `purge: true` now deletes the directory outright instead of moving it to the trash and removing it
+  again.
+- The provenance record (`trash.json`) is written **inside** the Session directory before it moves, so
+  it travels with the entry — including into the Windows Recycle Bin, whose contents the plugin
+  cannot read back.
+- The deletion result and the agent tool now report `backend` (`system` / `directory`) and `detail`
+  (`macos-trash` / `xdg-trash` / `recycle-bin` / `directory`), and `trashRoot` is `null` for a system
+  trash.
+- A **restore record** is written per deletion under `$DSH_HOME/session-delete/entries/`
+  (`config.restoreIndexRoot`), holding the entry path and the original directory — no Session content.
+  macOS refuses to let a process enumerate `~/.Trash` (TCC), so without it a trashed Session could not
+  be found again; the backend's own listing stays a second candidate source where it is allowed.
+
+### Fixed
+
+- Restoring a Session also withdraws its provenance record, so a restored directory holds only what
+  the session store expects.
+
+### Added
+
+- Platform trash backends with their own tests: macOS `~/.Trash` (Finder's ` 2` collision naming), the
+  XDG trash spec (percent-encoded `Path`, `DeletionDate`, `files`/`info` pairs), and the Windows
+  Recycle Bin through PowerShell.
+- A test proving an unusable destination fails with `session/delete-failed` **without** half-deleting
+  the log or leaving the provenance record behind.
+
 ## [0.1.1] - 2026-10-12
 
 ### Fixed
@@ -41,6 +78,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Mounting the plugin row twice keeps the first `sessionDelete` service instead of failing on a
   duplicate `ctx.provide`.
 
-[Unreleased]: https://github.com/hakulat2023/dsh-session-delete/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/hakulat2023/dsh-session-delete/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/hakulat2023/dsh-session-delete/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/hakulat2023/dsh-session-delete/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/hakulat2023/dsh-session-delete/releases/tag/v0.1.0

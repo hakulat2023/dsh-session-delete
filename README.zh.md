@@ -31,9 +31,12 @@ DSH 只能「存档」——存档只是隐藏,并没有办法真正摆脱一个
 1. **准入检查。** 用存档同一套 `workspace/session-activity` 瀑布询问该会话的状态。正在运行的
    工作在没有停止授权时会被拒绝;授权后由 `workspace/session-stop` 取消该回合,插件在预算内等待
    会话空闲。仍驻留在宿主进程内存中的会话会在**任何副作用之前**被拒绝,只有再次显式确认才会删除。
-2. **移动日志。** 把会话自己的目录移动(同一文件系统内是原子 `rename`,跨设备退化为复制+删除)
-   到 `$DSH_HOME/session-trash/<sessionId>-<时间戳>/`,并在同级写入 `trash.json`:会话 id、标题、
-   `cwd`、原始目录、字节数、文件数、删除时间。
+2. **把日志交给系统回收站。** 会话自己的目录被交给**平台自带的回收站** —— macOS 的废纸篓、
+   Linux 的 XDG trash、Windows 的回收站 —— 条目名为 `<sessionId>-<时间戳>`,目录内带一份
+   `trash.json`(标题、`cwd`、原始目录、字节数、文件数、删除时间);`purge: true` 直接永久删除、
+   不经过回收站。同时在 `$DSH_HOME/session-delete/entries/` 留一条小记录(条目路径 + 原始目录,
+   **不含任何会话内容**),因为 macOS 不允许进程**枚举** `~/.Trash`(TCC):没有它,删掉的会话就
+   再也找不回来。详见 [docs/architecture.md](docs/architecture.md)。
 3. **清理登记。** 从每个工作区的 `sessionIds` 账户中摘除该会话,清掉全局存档集合与置顶集合中的
    条目,并删除投影缓存记录。
 4. **通知界面。** 发出 `api-session/removed`,所有已连接的浏览器立即移除该行。
@@ -108,35 +111,57 @@ dsh plugin --profile desktop add dsh-session-delete
 
 回收站里的会话就是一个普通目录:
 
+| 平台 | 位置 | 说明 |
+|---|---|---|
+| macOS | `~/.Trash/<sessionId>-<时间戳>/` | 访达里可见;不会出现"放回原处"(不是访达移的),但 `session_restore` 可用 |
+| Linux | `$XDG_DATA_HOME/Trash/files/…` 及其 `.trashinfo` | 桌面环境的"还原"同样可用 |
+| Windows | 回收站 | 插件读不回回收站,需要手动还原 |
+
 ```bash
-cat ~/.dsh/session-trash/<sessionId>-*/trash.json      # originalDirectory、title、cwd、大小
-mv ~/.dsh/session-trash/<sessionId>-*/  <originalDirectory>   # 或者用 session_restore
+cat ~/.Trash/<sessionId>-*/trash.json      # originalDirectory、title、cwd、大小
 ```
 
-工作区注册表会在下一次组合时重新索引已存储的 header(重载应用,或下次启动),届时恢复的会话
-会重新出现在列表里。
+`session_restore(session_id)` 会把它放回原位并撤回两条记录;工作区注册表下一次索引已存储 header
+时(重载应用,或下次启动),该会话会重新出现在列表里。
 
 ## 配置
 
 | 字段 | 默认值 | 含义 |
 |---|---|---|
-| `trashRoot` | `$DSH_HOME/session-trash` | 会话目录被移动到的位置;不存在时按需创建。`DSH_HOME` 未设置时回退到持久化根目录的父目录。 |
+| `trash` | `"system"` | 目的地:`"system"` 用平台自带回收站;`"directory"` 用 `trashRoot`;其它字符串按绝对路径当作目录。 |
+| `trashRoot` | `$DSH_HOME/session-trash` | `trash: directory` 使用的目录(只写 `trashRoot` 时等价,兼容 0.1)。 |
+| `restoreIndexRoot` | `$DSH_HOME/session-delete` | 恢复记录(`entries/<条目名>.json`)的位置;只存元数据,绝不含会话内容。 |
 
 ```yaml
+# 默认就用系统回收站,无需配置
+- id: session-delete
+  name: dsh-session-delete
+
+# 或者自己指定目的地(例如机器的 ~/.Trash 不合适时)
 - id: session-delete
   name: dsh-session-delete
   config:
+    trash: directory
     trashRoot: /Volumes/big/dsh-session-trash
 ```
 
 ## 语义与边界
 
-- **删除是移动,不是抹除。** 在 `purge` 之前,字节仍在 `trashRoot` 下;回收站不会自动清理。
+- **回收站是你的,清空也由你决定。** 删除的会话进入平台回收站并一直留到你清空它;插件不会自动
+  清理,也不会自建任何回收站目录。
+- **macOS 不允许进程列举 `~/.Trash`。** 移入、按已知路径读取、再移出都可用,但 `readdir` 会被
+  TCC 拒绝。这正是需要那条恢复记录的唯一原因:`session_restore` 沿记录直达条目,而不是搜索回收站。
+  清空回收站会让记录过期,而过期记录会被静默剪除,不会变成假失败。
+- **Windows 的恢复是手动的。** 回收站没有面向消费者的"按条目找回"API,所以 `session_delete` 会
+  返回 `trashedTo: null`,`session_restore` 会明确提示去回收站手动还原。平台没有可用系统回收站时
+  会记一条警告并退回到 `trash: directory`。
 - **驻留内存的会话无法被第三方释放。** 会话存储自己持有写句柄且没有删除动词,因此删除一个仍被
   存活 Agent 持有的会话会破坏该 Agent 的追加写入。插件选择拒绝,只有显式 `force` 才继续
   (日志消失,内存副本随之失效)。
 - **停止是有预算的。** 等待运行中的工作结束的预算为 15 秒,并尊重调用的 `AbortSignal`;工作超出
   预算时以 `session/delete-active` 失败,且不会移动任何东西。
+- **目的地不可用就明确失败。** 回收站拒收时以 `session/delete-failed` 结束,日志原样保留 —— 为这
+  次尝试写下的记录会被撤回。
 - **只动会话自己的目录。** 附件与 spill 是内容寻址的全局存储,不做回收,可能留下孤儿文件。
 - **搜索索引无需清理。** 当前组合里的会话查询索引是内存索引,会自动丢弃消失的会话。
 - **Subagent 会话也是会话。** 可以用同一个工具删除,界面通过同一个事件移除它。
@@ -157,6 +182,8 @@ node test/verify.mjs      # 或 npm test
 - Typert 清单的形状**以及**严格编解码器的边界校验;
 - Gateway 的兜底(「SRC」)发现契约:原型上的 Remote 标记 + 由方法签名推导的参数名;
 - 回收站、恢复、永久删除、目录缺失、强制、拒绝、中断各分支;
+- 各平台后端:`~/.Trash` 命名、XDG 的 `files`/`info` 与 `.trashinfo`、PowerShell 回收命令;
+- 无法枚举的回收站上的恢复(依赖恢复记录)、过期记录、以及"目的地不可用也不能半删日志";
 - 每个工具返回值都是无损的纯 JSON(宿主会拒绝其它东西);
 - 同一次页面内重复挂载:用真实的浏览器 bundle,对一个「重复注册即抛错」的 locale 注册表挂载两次
   (一次有 teardown、一次没有),必须既不报错也不重复注册;
@@ -166,7 +193,9 @@ node test/verify.mjs      # 或 npm test
 
 | 路径 | 作用 |
 |---|---|
-| `lib/session-trash.js` | 注入式宿主适配器之上的回收站语义(可单测) |
+| `lib/session-trash.js` | 注入式宿主适配器之上的准入、清理与恢复逻辑(可单测) |
+| `lib/trash.js` | 平台回收站后端:macOS `~/.Trash`、XDG trash、Windows 回收站,或自建目录 |
+| `lib/restore-index.js` | 让"无法枚举的回收站"仍可恢复的元数据记录 |
 | `lib/index.js` | 宿主插件:`sessionDelete` 服务、它的 Typert 绑定、两个 Agent 工具 |
 | `lib/typert.host.js` | 手写 Typert 清单(严格编解码;由 `typert-loader` 注册) |
 | `lib/client.js` | 浏览器半边:菜单项、确认弹窗、`remote.sessionDelete` 调用 |
@@ -176,14 +205,14 @@ node test/verify.mjs      # 或 npm test
 
 ## 已验证的行为
 
-macOS 桌面版、DSH `0.2.0-rc.2`、profile `desktop`,针对为测试专门创建的一次性会话:
-
-| 步骤 | 观察结果 |
+| 项目 | 验证方式 |
 |---|---|
-| `session_delete` | 目录移动到 `~/.dsh/session-trash/<id>-<时间戳>/`,含 `trash.json`(`bytes: 13184`、`files: 2`、`move: "renamed"`);原目录消失;`session_projcache` 无记录;`workspace.json` 的 `sessionIds` 中不含该 id |
-| `session_restore` | 日志回到原始目录 |
-| `session_delete(purge: true)` | 回收站条目与日志都消失;零残留 |
+| 真实的 macOS 回收站 | 把一个目录 rename 进真实 `~/.Trash`,按路径读回,再 rename 出去;全程 `readdir('~/.Trash')` 被拒 —— 这正是恢复记录要覆盖的场景 |
+| 端到端删除 | macOS / 桌面版 / DSH `0.2.0-rc.2`,一次性会话:删除 → 条目进回收站并带 `trash.json` → 恢复 → 日志回到原位,两条记录都被撤回,回收站无残留 |
+| 宿主清理 | 目录进回收站的同时:无 `session_projcache` 记录、`workspace.json` 的 `sessionIds` 中该 id 消失、已广播 `api-session/removed` |
 | 客户端 | 槽位检查显示 `sidebar.workspaces.session.menu.item` 的占用者中含 `session-delete`(order 500, active) |
+| 自测 | 32 项(`node test/verify.mjs`),含 macOS / XDG / 回收站三种后端、"不可枚举的回收站只能靠恢复记录"以及过期记录剪除 |
+| CI | Node 20/22/24 × Ubuntu/macOS/Windows |
 
 ## 社区插件
 
