@@ -90,8 +90,8 @@ and `t` reads them (with an `en` fallback chain).
 
 Slot entries receive the owner's props (for a Session row: `sessionId`, `displayTitle`), the slot's
 declared hooks (`useMenuOpenState`, `useShortcuts`), the entry's own `inject` values, and `t`. A
-component that opens UI elsewhere registers into `shell.overlay`, which is where this plugin's
-confirmation dialog lives.
+component that reports UI elsewhere registers into `shell.overlay`, which is where this plugin's
+result toast lives.
 
 ## A Remote namespace without the generator
 

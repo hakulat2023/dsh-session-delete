@@ -33,7 +33,8 @@ One deletion performs four steps:
    `workspace/session-activity` waterfall. Live work is refused unless the caller allows a stop;
    when it is, `workspace/session-stop` cancels the turn and the plugin waits (bounded) for the
    Session to go idle. A Session still resident in the host process is refused *before any side
-   effect* and only deleted after a second, explicit confirmation.
+   effect* unless the caller sets `force`; the row's delete action is the user's explicit decision
+   and sends it, while the `session_delete` tool keeps `force` off by default.
 2. **Trash the log.** The Session's own directory is handed to the **platform's own trash** — the
    Finder's Trash on macOS, the XDG trash on Linux, the Recycle Bin on Windows — as
    `<sessionId>-<timestamp>`, carrying a `trash.json` record with the title, `cwd`, original
@@ -98,13 +99,16 @@ needs a page reload.
 
 ### Web UI
 
-Session row → **“…”** → **Delete session** → confirm.
+Session row → **“…”** → **Delete session**.
 
-- A **running** Session is stopped first: the first confirmation already carries that intent.
-- A Session that is still **resident** in the host (typically the one you have open) is described as
-  such and needs a second confirmation; the first click has no side effect at all.
-- On success the row disappears everywhere and a toast reports the outcome **and the trash directory**
-  (a Session whose log was already gone is reported as such, never as a move).
+- **No confirmation step.** The click deletes: a running turn is stopped first, and a Session still
+  resident in the host (typically the one you have open) is deleted with `force`, so its in-memory
+  copy becomes unusable.
+- A short **“Deleting…”** toast appears at once and is replaced by the outcome, so a Session whose
+  running turn has to stop first does not look like a no-op. On success the row disappears everywhere
+  and the toast says the Session was **moved to the trash**, naming the trash directory when a
+  directory backend is used (a Session whose log was already gone is reported as such, never as a
+  move). A failed deletion says why in the same toast.
 
 ### Agent tools
 
@@ -116,7 +120,7 @@ Session row → **“…”** → **Delete session** → confirm.
 ### Remote namespace
 
 `remote.sessionDelete.delete({ sessionId, stopActivity?, force?, purge? })` and
-`remote.sessionDelete.restore({ sessionId })` — the same operations the UI dialog uses.
+`remote.sessionDelete.restore({ sessionId })` — the same operations the UI uses.
 
 ### Restoring by hand
 
@@ -171,7 +175,8 @@ list once the Workspace registry next indexes stored headers (a reload, or the n
 - **A resident Session cannot be disposed by a third party.** The Session store owns its write
   handles and exposes no delete verb, so deleting a Session that a live Agent still holds would break
   that Agent's appends. The plugin refuses instead, and only proceeds on an explicit `force` (the log
-  is gone; the in-memory copy becomes unusable).
+  is gone; the in-memory copy becomes unusable) — which the sidebar's one-click delete sends, while the
+  tool keeps `force` off by default.
 - **Stopping is bounded.** The wait for running work to settle has a budget (15 s) and honours the
   call's `AbortSignal`; if the work outlives it, the call fails with `session/delete-active` and
   nothing is moved.
@@ -210,6 +215,9 @@ fake Cordis context, and checks the pieces that are easy to get wrong —
 - that every tool result is lossless plain JSON (the host rejects anything else);
 - re-application in one page: the real browser bundle, applied twice against a locale registry that
   throws on duplicates (once with a teardown, once without) must not fail or duplicate anything;
+- the row's one-click flow: the real browser bundle sends `stopActivity` and `force` from the menu
+  click, shows the pending toast, ignores a duplicate click while in flight, queues back-to-back
+  outcomes, and renders a success or failure toast;
 - a second mount of the host row, which must keep the first service instead of throwing.
 
 Layout:
@@ -221,7 +229,7 @@ Layout:
 | `lib/restore-index.js` | The metadata record that makes restore work on a trash that cannot be listed |
 | `lib/index.js` | Host plugin: the `sessionDelete` service, its Typert binding, and the two agent tools |
 | `lib/typert.host.js` | Hand-written Typert manifest (strict codecs; registered by `typert-loader`) |
-| `lib/client.js` | Browser half: menu row, confirmation dialog, `remote.sessionDelete` calls |
+| `lib/client.js` | Browser half: menu row, result toast, `remote.sessionDelete` calls |
 | `cordis.patch.yml` | Bundle patch: inserts the host row |
 | `test/verify.mjs` | The self-test above |
 | `docs/` | [Architecture](docs/architecture.md) and [packaging](docs/plugin-packaging.md) notes |
@@ -235,7 +243,7 @@ Layout:
 | Restore, in the packaged app | `session_restore` put the log back and withdrew both records — the directory then held only `session.lock` and the log |
 | Purge, in the packaged app | `session_delete(purge: true)` reported `deleted permanently` and left nothing in the trash |
 | Client | the Session menu's occupants include `session-delete` (order 500, active) — once, after the 0.1.1 reload-safety fix |
-| Self-test | 32 checks (`node test/verify.mjs`): the platform backends, an unlistable trash covered only by the restore record, stale records, an unusable destination that must not half-delete a log, the Typert manifest and SRC discovery, lossless-JSON tool results, browser-side re-application |
+| Self-test | 31 checks (`node test/verify.mjs`): the platform backends, an unlistable trash covered only by the restore record, stale records, an unusable destination that must not half-delete a log, the Typert manifest and SRC discovery, lossless-JSON tool results, browser-side re-application, and the one-click deletion with its result toasts |
 | CI | Node 20/22/24 × Ubuntu/macOS/Windows |
 
 ## Community plugin

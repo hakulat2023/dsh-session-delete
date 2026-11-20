@@ -40,7 +40,9 @@ while a turn is running, approvals and pending questions included), and `workspa
 cancels that turn the same way the user's own stop button does. Two properties matter:
 
 - **No side effect before consent.** A Session that is still resident in the host is refused *before*
-  the stop is issued, so the first confirmation of a running Session changes nothing at all.
+  the stop is issued unless the caller sets `force`. The sidebar's delete row is the user's explicit
+  decision and sends it; `session_delete` keeps `force` off by default, so an agent cannot dispose a
+  live Session silently.
 - **Bounded waiting.** The drain wait has a budget and honours the call's `AbortSignal`; if the work
   outlives it the call fails with `session/delete-active` and nothing has moved.
 
@@ -122,8 +124,10 @@ public way to dispose that Agent — the Session store's `enter()` returns a det
 *creator*, not to bystanders — so it refuses with `session/delete-live` and reports whether the
 Session is running, what activity it reported, and that a `force` call would proceed anyway.
 
-`force` is deliberately a second, explicit user decision (the dialog re-asks): by then the user has
-been told that the in-memory copy becomes unusable. It is never a default, and never silent.
+`force` is the caller's explicit decision, and the Host never assumes it: the refusal happens before
+any stop or move. The sidebar's delete row is a decision made in one click and sends `force` with the
+call; the `session_delete` tool leaves it off by default, so an agent has to ask for it explicitly.
+The toast afterwards only reports what happened — moved, stopped, or refused.
 
 ## Restore
 

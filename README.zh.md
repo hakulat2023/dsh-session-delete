@@ -30,7 +30,8 @@ DSH 只能「存档」——存档只是隐藏,并没有办法真正摆脱一个
 
 1. **准入检查。** 用存档同一套 `workspace/session-activity` 瀑布询问该会话的状态。正在运行的
    工作在没有停止授权时会被拒绝;授权后由 `workspace/session-stop` 取消该回合,插件在预算内等待
-   会话空闲。仍驻留在宿主进程内存中的会话会在**任何副作用之前**被拒绝,只有再次显式确认才会删除。
+   会话空闲。仍驻留在宿主进程内存中的会话默认会在**任何副作用之前**被拒绝;菜单里的删除是一次
+   明确的决定,会在同一调用里带上 `force`,而 `session_delete` 工具默认仍需显式 `force`。
 2. **把日志交给系统回收站。** 会话自己的目录被交给**平台自带的回收站** —— macOS 的废纸篓、
    Linux 的 XDG trash、Windows 的回收站 —— 条目名为 `<sessionId>-<时间戳>`,目录内带一份
    `trash.json`(标题、`cwd`、原始目录、字节数、文件数、删除时间);`purge: true` 直接永久删除、
@@ -87,13 +88,13 @@ dsh plugin --profile desktop add dsh-session-delete
 
 ### 界面
 
-会话行 → **“…”** → **删除会话** → 确认。
+会话行 → **“…”** → **删除会话**。
 
-- **运行中**的会话会先被停止:首次确认就已经是这个意图。
-- 仍然**驻留在内存中**(通常是你正打开的那个)的会话会被明确提示,需要第二次确认;第一次点击
-  不产生任何副作用。
-- 成功后该行在所有地方消失,提示里会给出**回收站目录**;日志本就不存在的会话会明确说明,而不会
-  谎称已移动。
+- **没有二次确认。** 点击即删除:插件会先停止运行中的回合,并对仍驻留在内存中(通常是你正打开
+  的那个)的会话直接使用 `force`,其内存副本随之失效。
+- 点击后立刻出现「正在删除…」提示,结束后替换为结果;需要先停止运行中的回合时,不会看起来像
+  没反应。成功后该行在所有地方消失,提示「已移入回收站」;使用目录回收站时会给出**回收站目录**,
+  日志本就不存在的会话会明确说明,而不会谎称已移动。删除失败时提示会给出原因。
 
 ### Agent 工具
 
@@ -105,7 +106,7 @@ dsh plugin --profile desktop add dsh-session-delete
 ### Remote 命名空间
 
 `remote.sessionDelete.delete({ sessionId, stopActivity?, force?, purge? })` 与
-`remote.sessionDelete.restore({ sessionId })` —— 界面弹窗用的就是这两个方法。
+`remote.sessionDelete.restore({ sessionId })` —— 界面用的就是这两个方法。
 
 ### 手动恢复
 
@@ -157,7 +158,7 @@ cat ~/.Trash/<sessionId>-*/trash.json      # originalDirectory、title、cwd、�
   会记一条警告并退回到 `trash: directory`。
 - **驻留内存的会话无法被第三方释放。** 会话存储自己持有写句柄且没有删除动词,因此删除一个仍被
   存活 Agent 持有的会话会破坏该 Agent 的追加写入。插件选择拒绝,只有显式 `force` 才继续
-  (日志消失,内存副本随之失效)。
+  (日志消失,内存副本随之失效)。界面的一次点击会带上 `force`;`session_delete` 工具默认不带。
 - **停止是有预算的。** 等待运行中的工作结束的预算为 15 秒,并尊重调用的 `AbortSignal`;工作超出
   预算时以 `session/delete-active` 失败,且不会移动任何东西。
 - **目的地不可用就明确失败。** 回收站拒收时以 `session/delete-failed` 结束,日志原样保留 —— 为这
@@ -187,6 +188,8 @@ node test/verify.mjs      # 或 npm test
 - 每个工具返回值都是无损的纯 JSON(宿主会拒绝其它东西);
 - 同一次页面内重复挂载:用真实的浏览器 bundle,对一个「重复注册即抛错」的 locale 注册表挂载两次
   (一次有 teardown、一次没有),必须既不报错也不重复注册;
+- 浏览器半边的一次点击删除:真实 bundle 从菜单点击直接发出 `stopActivity` + `force`,立即显示
+  进行中提示、忽略重复点击、把连续删除的结果排队,并用 toast 报告成功或失败;
 - 宿主行被挂载两次时必须保留第一个服务,而不是抛错。
 
 目录结构:
@@ -198,7 +201,7 @@ node test/verify.mjs      # 或 npm test
 | `lib/restore-index.js` | 让"无法枚举的回收站"仍可恢复的元数据记录 |
 | `lib/index.js` | 宿主插件:`sessionDelete` 服务、它的 Typert 绑定、两个 Agent 工具 |
 | `lib/typert.host.js` | 手写 Typert 清单(严格编解码;由 `typert-loader` 注册) |
-| `lib/client.js` | 浏览器半边:菜单项、确认弹窗、`remote.sessionDelete` 调用 |
+| `lib/client.js` | 浏览器半边:菜单项、结果提示、`remote.sessionDelete` 调用 |
 | `cordis.patch.yml` | bundle 补丁:插入宿主行 |
 | `test/verify.mjs` | 上面的自测 |
 | `docs/` | [架构](docs/architecture.md)与[打包](docs/plugin-packaging.md)笔记 |
@@ -212,7 +215,7 @@ node test/verify.mjs      # 或 npm test
 | 打包应用内的恢复 | `session_restore` 把日志放回原位并撤回两条记录,恢复后的目录只剩 `session.lock` 与日志 |
 | 打包应用内的永久删除 | `session_delete(purge: true)` 返回 `deleted permanently`,回收站无残留 |
 | 客户端 | 会话菜单占用者含 `session-delete`(order 500, active),且只有一个实例(0.1.1 的幂等挂载修复) |
-| 自测 | 32 项(`node test/verify.mjs`):各平台后端、只能靠恢复记录的不可枚举回收站、过期记录、目的地不可用时不半删日志、Typert 清单与 SRC 兜底、无损 JSON 工具结果、浏览器半边重复挂载 |
+| 自测 | 31 项(`node test/verify.mjs`):各平台后端、只能靠恢复记录的不可枚举回收站、过期记录、目的地不可用时不半删日志、Typert 清单与 SRC 兜底、无损 JSON 工具结果、浏览器半边重复挂载、一键删除与结果提示 |
 | CI | Node 20/22/24 × Ubuntu/macOS/Windows |
 
 ## 社区插件

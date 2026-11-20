@@ -7,6 +7,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-11-19
+
+### Changed
+
+- **The row deletes in one click.** The confirmation dialog is gone: the Session “…” menu's
+  **Delete session** sends the deletion immediately — stopping a running turn and forcing a Session
+  still resident in the host in the same call — and a toast reports that the Session was moved to
+  the trash. A pending “Deleting…” toast appears at once and is replaced by the outcome, so a stop
+  wait does not look like a no-op; common refusals are localized, and error toasts are held longer
+  than success toasts.
+
+### Removed
+
+- The `shell.overlay` confirmation dialog and its danger styling; the overlay now only renders the
+  result toast.
+
 ## [0.2.0] - 2026-10-12
 
 ### Changed

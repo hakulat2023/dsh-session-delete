@@ -671,7 +671,7 @@ await test("the host adapter degrades gracefully without optional services", asy
 	await rm(fx.home, { recursive: true, force: true });
 });
 
-await test("the client half survives being re-applied in one page", async () => {
+await test("the client half survives re-application and deletes in one click", async () => {
 	// Load the real browser module by giving it the module table it expects, then
 	// drive its apply() against a locale registry shaped like the shipped one:
 	// register() throws on a duplicate locale, and only the returned disposer
@@ -696,14 +696,20 @@ await test("the client half survives being re-applied in one page", async () => 
 	assert.equal(registration.id, "dsh-session-delete");
 
 	const reactStub = {
-		createElement: () => ({}),
+		createElement: (type, props) => ({ type, props }),
 		Fragment: {},
 		useSyncExternalStore: (_subscribe, snapshot) => snapshot(),
 		useEffect: () => {},
 		useState: (initial) => [initial, () => {}]
 	};
 	const reactJsxStub = {};
-	const primitivesStub = new Proxy({}, { get: () => () => ({}) });
+	const primitivesStub = {
+		MenuItemButton: function MenuItemButton() {},
+		IconTrashOutlineRegular: function IconTrashOutlineRegular() {},
+		Toast: function Toast() {},
+		IconWarningOutlineRegular: function IconWarningOutlineRegular() {},
+		Modal: function Modal() {}
+	};
 	const require = (specifier) => {
 		if (specifier === "react") return reactStub;
 		if (specifier === "react/jsx-runtime") return reactJsxStub;
@@ -730,9 +736,15 @@ await test("the client half survives being re-applied in one page", async () => 
 			},
 			has: (namespace, locale) => dictionaries.has(`${namespace}/${locale}`),
 			bind(namespace) {
-				return (key) => {
-					for (const [, entries] of dictionaries) if (entries[key] !== undefined) return entries[key];
-					return key;
+				return (key, values) => {
+					let text = key;
+					for (const [, entries] of dictionaries) {
+						if (entries[key] === undefined) continue;
+						text = entries[key];
+						break;
+					}
+					if (values === undefined) return text;
+					return text.replace(/\{(\w+)\}/g, (match, name) => (values[name] === undefined ? match : String(values[name])));
 				};
 			},
 			subscribe: (listener) => {
@@ -747,6 +759,7 @@ await test("the client half survives being re-applied in one page", async () => 
 		const effectCleanups = [];
 		const mounts = [];
 		const slotInjections = [];
+		const registrations = [];
 		const ctx = {
 			locale,
 			remote: {
@@ -765,7 +778,10 @@ await test("the client half survives being re-applied in one page", async () => 
 						for (const dispose of registrations) dispose();
 					};
 				},
-				register: () => () => {}
+				register: (definition, component) => {
+					registrations.push({ definition, component });
+					return () => {};
+				}
 			},
 			mounted: new Map(),
 			get: (key) => ctx.mounted.get(key),
@@ -776,7 +792,7 @@ await test("the client half survives being re-applied in one page", async () => 
 			},
 			logger: { warn: () => {}, error: () => {} }
 		};
-		return { ctx, effectCleanups, mounts, slotInjections };
+		return { ctx, effectCleanups, mounts, slotInjections, registrations };
 	};
 
 	// Generation 1 mounts, generation 2 replaces it exactly as the module system does:
@@ -805,6 +821,72 @@ await test("the client half survives being re-applied in one page", async () => 
 	const third = makePage(locale);
 	await exports.apply(third.ctx);
 	assert.deepEqual(locale.registered, ["en", "zh", "en", "zh"]);
+
+	// The row is the whole deletion flow: one click sends the request (with the
+	// stop and force the old dialog used to collect) and the overlay only reports
+	// the outcome. Nothing waits for a second confirmation.
+	const menu = third.registrations.find((entry) => entry.definition.name === "sidebar.workspaces.session.menu.item");
+	const overlay = third.registrations.find((entry) => entry.definition.name === "shell.overlay");
+	assert.ok(menu !== undefined && overlay !== undefined, "both slot entries are registered");
+	const calls = [];
+	third.ctx.mounted.set("remote.sessionDelete", {
+		delete: async (request) => {
+			calls.push(request);
+			return { ok: true, value: { moved: true, backend: "system" } };
+		}
+	});
+	const t = locale.bind("session-delete");
+	let menuOpen = true;
+	const makeRow = (sessionId, displayTitle) => menu.component({
+		sessionId,
+		displayTitle,
+		useMenuOpenState: () => [menuOpen, (next) => {
+			menuOpen = next;
+		}],
+		t,
+		...menu.definition.inject()
+	});
+	const row = makeRow("session-click-1", "Click me");
+	assert.equal(row.type, primitivesStub.MenuItemButton);
+
+	// One click starts the deletion; a second click while it is in flight is ignored.
+	row.props.onSelect();
+	assert.equal(menuOpen, false, "the row closes before the request settles");
+	const pending = overlay.component({ t });
+	assert.equal(pending.type, primitivesStub.Toast, "the click shows progress immediately");
+	assert.match(pending.props.text, /Deleting “Click me”…/);
+	assert.equal(pending.props.tone, undefined, "progress is not styled as a success");
+	row.props.onSelect();
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.deepEqual(calls, [{ sessionId: "session-click-1", stopActivity: true, force: true }], "the duplicate click did not race the request");
+
+	const settled = overlay.component({ t });
+	assert.equal(settled.type, primitivesStub.Toast, "the outcome is a toast, never a confirmation dialog");
+	assert.equal(settled.props.tone, "success");
+	assert.match(settled.props.text, /Click me/);
+	assert.match(settled.props.text, /moved to the system trash/);
+
+	// A second deletion completes while the first toast is still showing: its
+	// message waits in the queue instead of replacing the visible one.
+	makeRow("session-click-2", "Second click").props.onSelect();
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.deepEqual(calls[1], { sessionId: "session-click-2", stopActivity: true, force: true });
+	assert.match(overlay.component({ t }).props.text, /Click me/, "the first toast is still the visible one");
+	settled.props.onDone();
+	const secondToast = overlay.component({ t });
+	assert.match(secondToast.props.text, /Second click/);
+	secondToast.props.onDone();
+
+	third.ctx.mounted.set("remote.sessionDelete", {
+		delete: async () => ({ ok: false, error: { code: "session/delete-failed", message: "trash refused" } })
+	});
+	row.props.onSelect();
+	await new Promise((resolve) => setImmediate(resolve));
+	const failed = overlay.component({ t });
+	assert.equal(failed.type, primitivesStub.Toast);
+	assert.match(failed.props.text, /Could not delete “Click me”: trash refused/);
+	assert.ok(failed.props.icon !== undefined, "a failed deletion is marked with a warning icon");
+	assert.equal(failed.props.holdMs, 6000, "a failure is held longer than a success");
 });
 
 await test("sessionDeleteError is structurally a Remote failure", () => {
